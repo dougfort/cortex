@@ -1,11 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"math/rand"
 	"sync"
-	"time"
 )
 
 type NodeID uint32
@@ -27,15 +25,20 @@ type ReceiverNode struct {
 }
 
 type Node struct {
-	ID        NodeID
-	EventChan chan<- Event
-	MsgChan   <-chan Message
-	Receivers []ReceiverNode
+	ID           NodeID
+	EventChan    chan<- Event
+	IncomingChan <-chan Message
+	DeliveryChan chan<- Message
+	Receivers    []ReceiverNode
 }
 
 func main() {
 	const NODE_COUNT = 100
-	log.Printf("program starts with %d nodes", NODE_COUNT)
+	const MESSAGE_COUNT = 10
+
+	log.Printf("program starts with %d nodes to deliver %d messages", NODE_COUNT, MESSAGE_COUNT)
+
+	deliveryChan := make(chan Message, 1)
 
 	eventChan := make(chan Event, NODE_COUNT)
 	eventsDone := make(chan struct{})
@@ -58,10 +61,11 @@ func main() {
 	var wg sync.WaitGroup
 	for i := 0; i < NODE_COUNT; i++ {
 		node := Node{
-			ID:        nodeIDs[i],
-			EventChan: eventChan,
-			MsgChan:   msgChans[i],
-			Receivers: receivers,
+			ID:           nodeIDs[i],
+			EventChan:    eventChan,
+			IncomingChan: msgChans[i],
+			DeliveryChan: deliveryChan,
+			Receivers:    receivers,
 		}
 		wg.Add(1)
 		go func() {
@@ -70,17 +74,32 @@ func main() {
 		}()
 	}
 
-	// pick a random destination Node
-	destID := nodeIDs[rand.Int()%len(nodeIDs)]
+	// send some messages, asynchronously
+	go func() {
 
-	// send a message through a randomly selected msgChan
-	msgChan := msgChans[rand.Int()%len(msgChans)]
-	msgChan <- Message{
-		DestID: destID,
+		for i := 0; i < MESSAGE_COUNT; i++ {
+			// pick a random destination Node
+			destID := nodeIDs[rand.Int()%len(nodeIDs)]
+
+			// send a message through a randomly selected msgChan
+			msgChan := msgChans[rand.Int()%len(msgChans)]
+			msgChan <- Message{
+				DestID: destID,
+			}
+		}
+	}()
+
+	// wait for all messages to be received
+	var receivedCount int
+RECEIVE_LOOP:
+	for msg := range deliveryChan {
+		log.Printf("%05d: message received %s %v", msg.DestID, msg.Content, msg.Path)
+		receivedCount++
+		if receivedCount == MESSAGE_COUNT {
+			log.Println("all messages received")
+			break RECEIVE_LOOP
+		}
 	}
-
-	// TODO: wait for message delivery
-	time.Sleep(time.Second)
 
 	// close all the msg chans
 	for _, msgChan := range msgChans {
@@ -103,13 +122,10 @@ func computeID(i int) NodeID {
 
 func nodeFunc(node Node) {
 	node.EventChan <- Event{SourceID: node.ID, Text: "start"}
-	for msg := range node.MsgChan {
-		// if this message is to us, it is done
+	for msg := range node.IncomingChan {
+		// if this message is to us, it is delivered
 		if msg.DestID == node.ID {
-			node.EventChan <- Event{
-				SourceID: node.ID,
-				Text:     fmt.Sprintf("Message recieved: %v", msg.Path),
-			}
+			node.DeliveryChan <- msg
 		} else {
 			// pass the message on to a random receiver
 			receiver := node.Receivers[rand.Int()%len(node.Receivers)]
