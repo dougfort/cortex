@@ -1,17 +1,18 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"math/rand"
 	"sync"
 )
 
-type NodeID uint32
-
-type Event struct {
-	SourceID NodeID
-	Text     string
+type Config struct {
+	NodeCount    int
+	MessageCount int
 }
+
+type NodeID uint32
 
 type Message struct {
 	DestID  NodeID
@@ -26,30 +27,22 @@ type ReceiverNode struct {
 
 type Node struct {
 	ID           NodeID
-	EventChan    chan<- Event
 	IncomingChan <-chan Message
 	DeliveryChan chan<- Message
 	Receivers    []ReceiverNode
 }
 
 func main() {
-	const NODE_COUNT = 100
-	const MESSAGE_COUNT = 10
+	config := loadConfig()
 
-	log.Printf("program starts with %d nodes to deliver %d messages", NODE_COUNT, MESSAGE_COUNT)
+	log.Printf("program starts with %d nodes to deliver %d messages", config.NodeCount, config.MessageCount)
 
 	deliveryChan := make(chan Message, 1)
 
-	eventChan := make(chan Event, NODE_COUNT)
-	eventsDone := make(chan struct{})
-	go func() {
-		reportEvents(eventChan, eventsDone)
-	}()
-
-	nodeIDs := make([]NodeID, NODE_COUNT)
-	msgChans := make([]chan Message, NODE_COUNT)
-	receivers := make([]ReceiverNode, NODE_COUNT)
-	for i := 0; i < NODE_COUNT; i++ {
+	nodeIDs := make([]NodeID, config.NodeCount)
+	msgChans := make([]chan Message, config.NodeCount)
+	receivers := make([]ReceiverNode, config.NodeCount)
+	for i := 0; i < config.NodeCount; i++ {
 		nodeIDs[i] = computeID(i)
 		msgChans[i] = make(chan Message, 1)
 		receivers[i] = ReceiverNode{
@@ -59,10 +52,9 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < NODE_COUNT; i++ {
+	for i := 0; i < config.NodeCount; i++ {
 		node := Node{
 			ID:           nodeIDs[i],
-			EventChan:    eventChan,
 			IncomingChan: msgChans[i],
 			DeliveryChan: deliveryChan,
 			Receivers:    receivers,
@@ -77,7 +69,7 @@ func main() {
 	// send some messages, asynchronously
 	go func() {
 
-		for i := 0; i < MESSAGE_COUNT; i++ {
+		for i := 0; i < config.MessageCount; i++ {
 			// pick a random destination Node
 			destID := nodeIDs[rand.Int()%len(nodeIDs)]
 
@@ -95,7 +87,7 @@ RECEIVE_LOOP:
 	for msg := range deliveryChan {
 		log.Printf("%05d: message received %s %v", msg.DestID, msg.Content, msg.Path)
 		receivedCount++
-		if receivedCount == MESSAGE_COUNT {
+		if receivedCount == config.MessageCount {
 			log.Println("all messages received")
 			break RECEIVE_LOOP
 		}
@@ -109,11 +101,15 @@ RECEIVE_LOOP:
 	log.Println("waiting for nodes to finish")
 	wg.Wait()
 
-	log.Println("draining events")
-	close(eventChan)
-	<-eventsDone
-
 	log.Println("program ends")
+}
+
+func loadConfig() Config {
+	var config Config
+	flag.IntVar(&config.NodeCount, "node-count", 10, "Number of nodes")
+	flag.IntVar(&config.MessageCount, "message-count", 1, "Number of messages sent between nodes")
+	flag.Parse()
+	return config
 }
 
 func computeID(i int) NodeID {
@@ -121,25 +117,23 @@ func computeID(i int) NodeID {
 }
 
 func nodeFunc(node Node) {
-	node.EventChan <- Event{SourceID: node.ID, Text: "start"}
 	for msg := range node.IncomingChan {
 		// if this message is to us, it is delivered
 		if msg.DestID == node.ID {
 			node.DeliveryChan <- msg
 		} else {
-			// pass the message on to a random receiver
-			receiver := node.Receivers[rand.Int()%len(node.Receivers)]
-			msg.Path = append(msg.Path, node.ID)
-			receiver.MsgChan <- msg
+			// pass the message on to a random receiver, but not ourselves
+		RECEIVER_LOOP:
+			for {
+				receiver := node.Receivers[rand.Int()%len(node.Receivers)]
+				if receiver.ID == node.ID {
+					continue RECEIVER_LOOP
+				}
+
+				msg.Path = append(msg.Path, node.ID)
+				receiver.MsgChan <- msg
+				break RECEIVER_LOOP
+			}
 		}
 	}
-	node.EventChan <- Event{SourceID: node.ID, Text: "end"}
-}
-
-func reportEvents(eventChan <-chan Event, eventsDone chan<- struct{}) {
-	for event := range eventChan {
-		log.Printf("%05d: %s", event.SourceID, event.Text)
-	}
-	log.Println("eventChan closed")
-	close(eventsDone)
 }
